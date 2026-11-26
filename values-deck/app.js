@@ -137,11 +137,34 @@
   // Each person can do the private part on their own device. A locked set of
   // answers (one person's "half") is sent as a file or as text, and the other
   // device adds it beside its own. Nothing is sent by the app itself.
-  function b64(str) { return btoa(unescape(encodeURIComponent(str))); }
-  function unb64(str) { return decodeURIComponent(escape(atob(str.replace(/\s+/g, '')))); }
+  // What travels is scrambled with a key built into the app, so it cannot be
+  // read by opening the file or decoding the text. This removes the temptation
+  // to peek; it is not strong encryption, because the key ships with the page.
+  var SEAL_KEY = 'values-deck:sealed-until-you-are-together', SEAL_TAG = 'VC1.';
+  function sealStream(salt) {
+    var h = 2166136261, i, src = SEAL_KEY + '|' + salt.join(',');
+    for (i = 0; i < src.length; i++) { h ^= src.charCodeAt(i); h = Math.imul(h, 16777619); }
+    h = h >>> 0 || 1;
+    return function () { h ^= h << 13; h >>>= 0; h ^= h >>> 17; h ^= h << 5; h >>>= 0; return h & 255; };
+  }
+  function seal(str) {
+    var bytes = unescape(encodeURIComponent(str)), salt = [], i, out = '';
+    for (i = 0; i < 6; i++) salt.push(Math.floor(Math.random() * 256));
+    var next = sealStream(salt);
+    for (i = 0; i < salt.length; i++) out += String.fromCharCode(salt[i]);
+    for (i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes.charCodeAt(i) ^ next());
+    return SEAL_TAG + btoa(out);
+  }
+  function unseal(t) {
+    var raw = atob(t.slice(SEAL_TAG.length).replace(/\s+/g, '')), salt = [], i, out = '';
+    for (i = 0; i < 6; i++) salt.push(raw.charCodeAt(i));
+    var next = sealStream(salt);
+    for (i = 6; i < raw.length; i++) out += String.fromCharCode(raw.charCodeAt(i) ^ next());
+    return decodeURIComponent(escape(out));
+  }
   function parseText(t) {
     t = String(t || '').trim();
-    return JSON.parse(t.charAt(0) === '{' ? t : unb64(t));
+    return JSON.parse(t.indexOf(SEAL_TAG) === 0 ? unseal(t) : t);
   }
   function lockedOne() {
     var la = state.resp.a.locked, lb = state.resp.b.locked;
@@ -410,14 +433,14 @@
     }
     return h + '<p>' + esc(nm(mine)) + '\'s answers are locked on this device. One device needs both sets: either send ' + esc(nm(mine)) + '\'s answers to ' + esc(nm(o)) + ', or add ' + esc(nm(o)) + '\'s here. Only one of you needs to send.</p>' +
       '<h2>Send ' + esc(nm(mine)) + '\'s answers</h2>' +
-      '<p class="small">This holds ' + esc(nm(mine)) + '\'s private answers and nothing else. Send it to ' + esc(nm(o)) + ' yourself, for example in a message. The app sends nothing.</p>' +
+      '<p class="small">This holds ' + esc(nm(mine)) + '\'s private answers and nothing else, scrambled so they cannot be read outside the app. Send it to ' + esc(nm(o)) + ' yourself, for example in a message. The app sends nothing.</p>' +
       '<div class="actions wrap"><button class="btn primary" data-act="pairCopy">Copy as text</button><button class="btn" data-act="pairSave">Save as a file</button></div>' +
-      '<details class="paste"><summary>Show the text</summary><textarea id="pairText" rows="5" readonly spellcheck="false">' + esc(b64(halfJson(mine))) + '</textarea></details>' +
+      '<details class="paste"><summary>Show the text</summary><textarea id="pairText" rows="5" readonly spellcheck="false">' + esc(seal(halfJson(mine))) + '</textarea></details>' +
       '<h2>Add ' + esc(nm(o)) + '\'s answers</h2>' +
       '<p class="small">Paste the text ' + esc(nm(o)) + ' sent you, or open their file. The reveal starts straight away, so do this when you are together.</p>' +
       '<textarea id="pairIn" rows="4" spellcheck="false" autocomplete="off" placeholder="Paste the text here"></textarea>' +
       '<div class="actions wrap"><button class="btn primary" data-act="pairPaste">Add the pasted answers</button>' +
-      '<label class="btn filebtn">Open their file<input type="file" accept=".json,application/json,text/plain" data-file="half" hidden></label></div>' +
+      '<label class="btn filebtn">Open their file<input type="file" accept=".txt,.json,application/json,text/plain" data-file="half" hidden></label></div>' +
       '<div class="actions"><button class="btn" data-act="pairBack">Back</button></div>';
   };
 
@@ -967,11 +990,11 @@
     pairWho: function (p) { if (!state.resp[p].locked) { state.turn = p; save(); render(); } },
     pairCopy: function () {
       var d = document.querySelector('details.paste'); if (d) d.open = true;
-      copy(b64(halfJson(lockedOne())), 'pairText');
+      copy(seal(halfJson(lockedOne())), 'pairText');
     },
     pairSave: function () {
       var p = lockedOne();
-      saveFile('values-deck-answers-' + slug(nm(p)) + '-' + stamp(false) + '.json', halfJson(p), function () { toast('Saving files is not available here. Use Copy as text.'); });
+      saveFile('values-deck-answers-' + slug(nm(p)) + '-' + stamp(false) + '.txt', seal(halfJson(p)), function () { toast('Saving files is not available here. Use Copy as text.'); });
     },
     pairPaste: function () {
       var t = (document.getElementById('pairIn') || {}).value || '';

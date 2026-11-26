@@ -14,7 +14,7 @@ Both apps work on one shared device passed back and forth. The private part can 
 3. One person chooses **Send or add answers**, copies their locked answers as text (or saves them as a file) and sends them to the other, for example in a message. The other pastes or opens them on the same screen.
 4. That device now holds both sets and carries on to the shared part, which you do together on it.
 
-The app does not send anything itself. What you send holds one person's private answers, so send it only to your partner.
+The app does not send anything itself. What you send holds one person's private answers, scrambled with a key built into the app so it cannot be read by opening the file or decoding the text. That removes the temptation to peek before you sit down together. It is not strong encryption: the key ships with the page, so send it only to your partner.
 
 ## Privacy
 
