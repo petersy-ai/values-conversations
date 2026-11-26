@@ -1,6 +1,7 @@
 /* Values Deck: a guided values conversation for two people.
- * Artifact edition: one shared device, passed back and forth.
- * No backend, no analytics, no links or codes. */
+ * One shared device passed back and forth, or one device each for the private
+ * part: a locked set of answers travels as a file or text the couple sends
+ * themselves. No backend, no analytics. */
 (function () {
   'use strict';
   var S = VD.score;
@@ -95,18 +96,21 @@
   }
   function sessionJson() {
     var snap = JSON.parse(JSON.stringify(state));
+    if (snap.screen === 'pair') snap.screen = snap.turn ? 'handover' : 'welcome';
     if (snap.screen === 'save' || snap.screen === 'about' || snap.screen === 'resume') {
-      var back = ui.prev && ui.prev !== 'save' && ui.prev !== 'about' ? ui.prev : ui.resumeTo;
+      var back = ui.prev && ui.prev !== 'save' && ui.prev !== 'about' && ui.prev !== 'pair' ? ui.prev : ui.resumeTo;
       snap.screen = back && SCREENS[back] ? back : 'welcome';
     }
     return JSON.stringify({ app: 'values-deck', kind: 'session', version: 1, savedAt: new Date().toISOString(), state: snap }, null, 1);
   }
   function loadSession(obj) {
+    if (obj && obj.app === 'values-deck' && obj.kind === 'half') return importHalf(obj);
     if (!obj || obj.app !== 'values-deck' || obj.kind !== 'session' || !obj.state || obj.state.v !== 1 || !obj.state.resp) {
       return toast('That is not a Values Deck save file.');
     }
     state = normalise(obj.state); ui = {};
     var s = state.screen;
+    if (s === 'pair') s = 'handover';
     if (!SCREENS[s] || s === 'welcome' || s === 'resume' || s === 'save' || s === 'about') s = 'setup';
     ui.resumeTo = s; state.screen = 'resume';
     save(); render(); window.scrollTo(0, 0);
@@ -117,7 +121,8 @@
     if (!f) return;
     var rd = new FileReader();
     rd.onload = function () {
-      try { loadSession(JSON.parse(rd.result)); } catch (e) { toast('That file could not be read as a Values Deck save file.'); }
+      var obj; try { obj = parseText(rd.result); } catch (e) { return toast('That file could not be read as a Values Deck file.'); }
+      loadSession(obj);
     };
     rd.readAsText(f);
   }
@@ -126,6 +131,59 @@
       '<details class="paste"><summary>Or paste the saved text</summary>' +
       '<textarea id="loadText" rows="4" spellcheck="false" autocomplete="off" placeholder="{&quot;app&quot;: &quot;values-deck&quot;, ...}"></textarea>' +
       '<button class="btn" data-act="loadPaste">Open</button></details>';
+  }
+
+  // ---------- two devices ----------
+  // Each person can do the private part on their own device. A locked set of
+  // answers (one person's "half") is sent as a file or as text, and the other
+  // device adds it beside its own. Nothing is sent by the app itself.
+  function b64(str) { return btoa(unescape(encodeURIComponent(str))); }
+  function unb64(str) { return decodeURIComponent(escape(atob(str.replace(/\s+/g, '')))); }
+  function parseText(t) {
+    t = String(t || '').trim();
+    return JSON.parse(t.charAt(0) === '{' ? t : unb64(t));
+  }
+  function lockedOne() {
+    var la = state.resp.a.locked, lb = state.resp.b.locked;
+    return la && !lb ? 'a' : lb && !la ? 'b' : null;
+  }
+  function halfJson(p) {
+    return JSON.stringify({ app: 'values-deck', kind: 'half', version: 1, savedAt: new Date().toISOString(), id: state.id,
+      person: p, name: nm(p), intimacy: !!state.opts.intimacy, domainsOff: state.domainsOff, custom: state.custom, resp: state.resp[p] });
+  }
+  function importHalf(obj) {
+    if (!obj || obj.version !== 1 || !obj.resp || !obj.resp.locked) return toast('Those answers are not locked yet. Lock them on the other device, then send them again.');
+    var mine = lockedOne();
+    if (both()) return toast('This device already has both sets of answers.');
+    if (!state.mode || !mine) return toast('Lock your own answers on this device first, then add your partner\'s.');
+    if (obj.resp.lockedAt && obj.resp.lockedAt === state.resp[mine].lockedAt) return toast('Those are the answers from this device. Add your partner\'s instead.');
+    var slot = other(mine), r = Object.assign(blankResp(), obj.resp);
+    r.predict = Object.assign(blankResp().predict, obj.resp.predict || {});
+    r.stage = null;
+    // Custom cards made on the other device join this deck.
+    (Array.isArray(obj.custom) ? obj.custom : []).forEach(function (c) {
+      if (!c || !/^c[a-z0-9]{1,12}$/.test(c.id) || state.custom.some(function (x) { return x.id === c.id; })) return;
+      state.custom.push({ id: c.id, owner: c.owner === obj.person ? slot : mine, name: String(c.name || '').slice(0, 24),
+        def: String(c.def || '').slice(0, 80), ho: VD.HO[c.ho] ? c.ho : null });
+    });
+    var ids = cards().map(function (c) { return c.id; });
+    var known = function (list) { return (Array.isArray(list) ? list : []).filter(function (id) { return ids.indexOf(id) >= 0; }); };
+    r.top = known(r.top); r.predict.top = known(r.predict.top);
+    // A card one of you never saw counts as passed.
+    ids.forEach(function (id) {
+      if (r.piles[id] == null) r.piles[id] = 'pass';
+      if (state.resp[mine].piles[id] == null) state.resp[mine].piles[id] = 'pass';
+    });
+    // Compare only the life areas you both had switched on.
+    if (obj.intimacy === false) state.opts.intimacy = false;
+    var off = state.domainsOff.slice();
+    (Array.isArray(obj.domainsOff) ? obj.domainsOff : []).forEach(function (id) { if (domain(id) && state.domainsOff.indexOf(id) < 0) state.domainsOff.push(id); });
+    if (!domains().length) state.domainsOff = off;
+    var name = String(obj.name || '').trim().slice(0, 20);
+    if (name && name.toLowerCase() !== nm(mine).trim().toLowerCase()) state.names[slot] = name;
+    state.resp[slot] = r; state.rules = { a: true, b: true }; state.turn = null; ui = {};
+    go('reveal-intro');
+    toast(nm(slot) + '\'s answers added.');
   }
 
   // ---------- helpers ----------
@@ -249,8 +307,9 @@
       '<ol class="how"><li><b>Private sort</b>, 20 to 30 minutes each: value cards, your top 7, life areas, and a guess at your partner\'s top values.</li>' +
       '<li><b>Reveal together</b>, 30 to 40 minutes: what you share, what surprised you, and where you differ.</li>' +
       '<li><b>Close</b>: what you appreciated hearing, what to come back to, and an optional joint summary.</li></ol>' +
-      '<h2>You need one phone, tablet or laptop</h2>' +
-      '<p>You pass it back and forth. One of you answers in private while the other looks away, then you swap. For the reveal, sit side by side where you can both see the screen.</p>' +
+      '<h2>One device, or one each</h2>' +
+      '<p>On one phone, tablet or laptop, you pass it back and forth: one of you answers in private while the other looks away, then you swap. For the reveal, sit side by side where you can both see the screen.</p>' +
+      '<p>To do the private part at the same time, each of you opens this page on your own device and chooses Start. After the set-up, choose <b>Use two devices</b>.</p>' +
       '<p class="small muted">The app sends your answers nowhere. They stay in this browser, and are kept between visits only if you leave Save progress on. You can also save them to a file.</p>' +
       '<div class="choice"><button class="btn big primary" data-act="start">Start<span>Set up together: names and options, about 5 minutes</span></button></div>' +
       '<h2>Carry on from a saved file</h2><p class="small">If you saved your progress to a .json file, open it here to pick up where you left off.</p>' + loadControls();
@@ -329,7 +388,37 @@
     return '<div class="handover"><p class="muted">Private turn</p><h1>Pass the device to ' + esc(nm(t)) + '</h1>' +
       '<p>' + esc(nm(other(t))) + ', step away or look elsewhere until ' + esc(nm(t)) + ' has locked their answers.</p>' +
       '<button class="btn primary big" data-act="startPrivate" data-arg="' + t + '">I\'m ' + esc(nm(t)) + ' and ready</button>' +
+      (lockedOne()
+        ? '<p>Is ' + esc(nm(t)) + ' answering on another device?</p><button class="btn" data-act="pairOpen">Send or add answers</button>'
+        : '<p class="small muted">One device each for this part? <button class="link" data-act="pairOpen">Use two devices</button></p>') +
       '<p class="small muted">Stopping here for today? <button class="link" data-act="saveScreen">Save to a file</button> first.</p></div>';
+  };
+
+  SCREENS.pair = function () {
+    var mine = lockedOne(), o = mine && other(mine), h = '<h1>Two devices</h1>';
+    if (both()) return h + '<p>This device already has both sets of answers.</p><div class="actions"><button class="btn primary" data-act="pairBack">Back</button></div>';
+    if (!mine) {
+      return h + '<p>Each of you can do the private part on your own device, at the same time. Afterwards one device brings both sets of answers together for the reveal.</p>' +
+        '<ol class="how"><li>On each device, open this page, choose Start and set up with the same two names.</li>' +
+        '<li>Below, choose who is answering on this device. Do your private part and lock it.</li>' +
+        '<li>When your answers are locked, come back to this screen to send them to your partner, or to add theirs.</li></ol>' +
+        '<h2>Who is answering on this device?</h2><div class="actions wrap">' + ['a', 'b'].map(function (p) {
+          return '<button class="btn' + (state.turn === p ? ' on' : '') + '" data-act="pairWho" data-arg="' + p + '">' + esc(nm(p)) + '</button>';
+        }).join('') + '</div>' +
+        '<p class="small muted">The other person\'s answers on this device stay empty until you add them. If you each add custom cards or switch off different life areas, the reveal uses all the custom cards and only the life areas you both kept.</p>' +
+        '<div class="actions"><button class="btn primary" data-act="pairBack">Continue</button></div>';
+    }
+    return h + '<p>' + esc(nm(mine)) + '\'s answers are locked on this device. One device needs both sets: either send ' + esc(nm(mine)) + '\'s answers to ' + esc(nm(o)) + ', or add ' + esc(nm(o)) + '\'s here. Only one of you needs to send.</p>' +
+      '<h2>Send ' + esc(nm(mine)) + '\'s answers</h2>' +
+      '<p class="small">This holds ' + esc(nm(mine)) + '\'s private answers and nothing else. Send it to ' + esc(nm(o)) + ' yourself, for example in a message. The app sends nothing.</p>' +
+      '<div class="actions wrap"><button class="btn primary" data-act="pairCopy">Copy as text</button><button class="btn" data-act="pairSave">Save as a file</button></div>' +
+      '<details class="paste"><summary>Show the text</summary><textarea id="pairText" rows="5" readonly spellcheck="false">' + esc(b64(halfJson(mine))) + '</textarea></details>' +
+      '<h2>Add ' + esc(nm(o)) + '\'s answers</h2>' +
+      '<p class="small">Paste the text ' + esc(nm(o)) + ' sent you, or open their file. The reveal starts straight away, so do this when you are together.</p>' +
+      '<textarea id="pairIn" rows="4" spellcheck="false" autocomplete="off" placeholder="Paste the text here"></textarea>' +
+      '<div class="actions wrap"><button class="btn primary" data-act="pairPaste">Add the pasted answers</button>' +
+      '<label class="btn filebtn">Open their file<input type="file" accept=".json,application/json,text/plain" data-file="half" hidden></label></div>' +
+      '<div class="actions"><button class="btn" data-act="pairBack">Back</button></div>';
   };
 
   SCREENS['p-intro'] = function () {
@@ -870,7 +959,26 @@
     loadPaste: function () {
       var t = (document.getElementById('loadText') || {}).value || '';
       if (!t.trim()) return toast('Paste the saved text first.');
-      try { loadSession(JSON.parse(t)); } catch (e) { toast('That text is not a Values Deck save. Paste all of it, from { to }.'); }
+      var obj; try { obj = parseText(t); } catch (e) { return toast('That text is not a Values Deck save. Paste all of it.'); }
+      loadSession(obj);
+    },
+    pairOpen: function () { ui.eraseArm = false; state.screen = 'pair'; render(); window.scrollTo(0, 0); },
+    pairBack: function () { go(state.turn ? 'handover' : 'welcome'); },
+    pairWho: function (p) { if (!state.resp[p].locked) { state.turn = p; save(); render(); } },
+    pairCopy: function () {
+      var d = document.querySelector('details.paste'); if (d) d.open = true;
+      copy(b64(halfJson(lockedOne())), 'pairText');
+    },
+    pairSave: function () {
+      var p = lockedOne();
+      saveFile('values-deck-answers-' + slug(nm(p)) + '-' + stamp(false) + '.json', halfJson(p), function () { toast('Saving files is not available here. Use Copy as text.'); });
+    },
+    pairPaste: function () {
+      var t = (document.getElementById('pairIn') || {}).value || '';
+      if (!t.trim()) return toast('Paste the text first.');
+      var obj; try { obj = parseText(t); } catch (e) { return toast('That text could not be read. Copy all of it and paste again.'); }
+      if (!obj || obj.app !== 'values-deck' || obj.kind !== 'half') return toast('That is not a set of Values Deck answers.');
+      importHalf(obj);
     },
     savePdf: function () {
       if (ui.pdfBusy) return;
@@ -892,7 +1000,7 @@
     erase: function () { eraseAll(); },
     resume: function () {
       var s = ui.resumeTo || 'welcome';
-      if (s.indexOf('p-') === 0 && state.mode === 'shared') s = 'handover';
+      if ((s.indexOf('p-') === 0 || s === 'pair') && state.mode === 'shared') s = 'handover';
       if (s === 'about' || s === 'resume' || !SCREENS[s]) s = 'welcome';
       go(s);
     },

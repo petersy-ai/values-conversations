@@ -1,5 +1,7 @@
 /* Enough of Both: a conversation guide about security and novelty, for two
- * people on one shared device. No scores, no rankings, no verdicts.
+ * people on one shared device (or one device each for the private preparation,
+ * with a locked set of answers sent between them as a file or text).
+ * No scores, no rankings, no verdicts.
  * Answers stay in the browser; they leave it only as files the couple saves. */
 (function () {
   'use strict';
@@ -180,16 +182,19 @@
   }
   function sessionJson() {
     var snap = JSON.parse(JSON.stringify(state));
+    if (snap.screen === 'pair' || (ui.prev === 'pair' && ['save', 'about', 'help'].indexOf(snap.screen) >= 0)) snap.screen = snap.handover ? 'handover' : 'welcome';
     if (['save', 'about', 'help', 'resume', 'repair', 'timeout'].indexOf(snap.screen) >= 0) snap.screen = ui.prev && ui.prev !== snap.screen ? ui.prev : 'welcome';
     if (snap.timeout) snap.screen = snap.timeout.prev || snap.screen;
     snap.timeout = null;
     return JSON.stringify({ app: 'enough-of-both', kind: 'session', version: 1, savedAt: new Date().toISOString(), state: snap }, null, 1);
   }
   function loadSession(obj) {
+    if (obj && obj.app === 'enough-of-both' && obj.kind === 'half') return importHalf(obj);
     if (obj && obj.app === 'values-deck') return toast('That is a Values Deck file. To use it, start a new conversation and add it in Set up.');
     if (!obj || obj.app !== 'enough-of-both' || obj.kind !== 'session' || !obj.state || obj.state.v !== 1) return toast('That is not an Enough of Both save file.');
     state = normalise(obj.state); ui = { keep: {} };
     var s = state.screen;
+    if (s === 'pair') s = state.handover ? 'handover' : 'setup';
     if (!SCREENS[s] || ['welcome', 'resume', 'save', 'about', 'help', 'repair', 'timeout'].indexOf(s) >= 0) s = 'setup';
     ui.resumeTo = s; state.screen = 'resume';
     save(); render(); window.scrollTo(0, 0);
@@ -199,13 +204,60 @@
     var f = input.files && input.files[0];
     if (!f) return;
     var rd = new FileReader();
-    rd.onload = function () { var obj; try { obj = JSON.parse(rd.result); } catch (e) { return toast('That file could not be read.'); } cb(obj); };
+    rd.onload = function () { var obj; try { obj = parseText(rd.result); } catch (e) { return toast('That file could not be read.'); } cb(obj); };
     rd.readAsText(f);
   }
   function loadControls() {
     return '<div class="actions wrap"><label class="btn filebtn">Open a saved file<input type="file" id="loadFile" accept=".json,application/json,text/plain" data-file="session" hidden></label></div>' +
       '<details class="paste"><summary>Or paste the saved text</summary><textarea id="loadText" rows="4" spellcheck="false" autocomplete="off"></textarea>' +
       '<button class="btn" data-act="loadPaste">Open</button></details>';
+  }
+
+  // ---------- two devices ----------
+  // Each person can prepare on their own device. A locked preparation (one
+  // person's "half") is sent as a file or as text, and the other device adds it
+  // beside its own. Nothing is sent by the app itself.
+  function b64(str) { return btoa(unescape(encodeURIComponent(str))); }
+  function unb64(str) { return decodeURIComponent(escape(atob(str.replace(/\s+/g, '')))); }
+  function parseText(t) {
+    t = String(t || '').trim();
+    return JSON.parse(t.charAt(0) === '{' ? t : unb64(t));
+  }
+  function bothLocked() { return state.prep.a.locked && state.prep.b.locked; }
+  function lockedOne() {
+    var la = state.prep.a.locked, lb = state.prep.b.locked;
+    return la && !lb ? 'a' : lb && !la ? 'b' : null;
+  }
+  function halfJson(p) {
+    return JSON.stringify({ app: 'enough-of-both', kind: 'half', version: 1, savedAt: new Date().toISOString(), id: state.id,
+      person: p, name: nm(p), custom: state.custom, prep: state.prep[p] });
+  }
+  function importHalf(obj) {
+    if (!obj || obj.version !== 1 || !obj.prep || !obj.prep.locked) return toast('That preparation is not locked yet. Lock it on the other device, then send it again.');
+    var mine = lockedOne();
+    if (bothLocked()) return toast('This device already has both preparations.');
+    if (!state.mode || !mine) return toast('Lock your own preparation on this device first, then add your partner’s.');
+    if (obj.prep.lockedAt && obj.prep.lockedAt === state.prep[mine].lockedAt) return toast('That is the preparation from this device. Add your partner’s instead.');
+    var slot = other(mine), r = deepMerge(blankPrep(), obj.prep);
+    r.stage = null;
+    // Custom cards made on the other device join this deck.
+    (Array.isArray(obj.custom) ? obj.custom : []).forEach(function (c) {
+      if (!c || !/^C[a-z0-9]{1,12}$/.test(c.id) || state.custom.length >= EB.CUSTOM_MAX * 2 || state.custom.some(function (x) { return x.id === c.id; })) return;
+      state.custom.push({ id: c.id, owner: c.owner === obj.person ? slot : mine, text: String(c.text || '').slice(0, 90), pole: c.pole === 'S' || c.pole === 'N' ? c.pole : null });
+    });
+    var ids = cards().map(function (c) { return c.id; });
+    var known = function (list) { return (Array.isArray(list) ? list : []).filter(function (id) { return ids.indexOf(id) >= 0; }); };
+    r.core = known(r.core); r.flexible = known(r.flexible);
+    // A card one of you never saw counts as passed.
+    [r, state.prep[mine]].forEach(function (q) {
+      ids.forEach(function (id) { if (!q.ratings[id] || (q.ratings[id].need == null && !q.ratings[id].pass)) q.ratings[id] = Object.assign(q.ratings[id] || {}, { pass: true }); });
+    });
+    var name = String(obj.name || '').trim().slice(0, 20);
+    if (name && name.toLowerCase() !== nm(mine).trim().toLowerCase()) { state.names[slot] = name; if (state.context) matchContext(state.context); }
+    state.prep[slot] = r; ui = { keep: {} };
+    state.turn = mine;
+    afterPrivate('prep');
+    toast(nm(slot) + '’s preparation added.');
   }
 
   // Values Deck results, imported as context only: a saved Values Deck session,
@@ -340,7 +392,7 @@
       '<li><b>Sitting one</b>, 60 to 75 minutes together: look at the cards, take turns as speaker and listener, name your pattern, and build a map of core and flexible needs.</li>' +
       '<li><b>Sitting two</b>, within a week, 40 to 50 minutes: offers, then asks, then one to three small experiments with a review date.</li>' +
       '<li><b>Review</b>, 20 to 30 minutes on the review date: keep, tweak or drop each experiment.</li></ol>' +
-      '<p class="small muted">You need one phone, tablet or laptop and pass it between you. The app sends your answers nowhere. They stay in this browser, and you can save them to a file to carry on later.</p>' +
+      '<p class="small muted">You need one phone, tablet or laptop and pass it between you. To prepare at the same time on a device each, both choose Start and then <b>Use two devices</b> after the set-up. The app sends your answers nowhere. They stay in this browser, and you can save them to a file to carry on later.</p>' +
       '<div class="choice"><button class="btn big primary" data-act="start">Start<span>Set up together, about 5 minutes</span></button></div>' +
       '<h2>Carry on from a saved file</h2><p class="small">Open a file you saved earlier, including for a review.</p>' + loadControls() +
       '<p class="small"><button class="link" data-act="util" data-arg="help">Getting help: when to stop, and who to call</button></p>';
@@ -405,7 +457,37 @@
     return '<div class="handover"><p class="muted">Private turn</p><h1>Pass the device to ' + esc(nm(t)) + '</h1>' +
       '<p>' + what + '</p><p>' + esc(nm(o)) + ', look elsewhere until ' + esc(nm(t)) + ' hands it back.</p>' +
       '<button class="btn primary big" data-act="beginPrivate">I’m ' + esc(nm(t)) + ' and ready</button>' +
+      (h.purpose !== 'prep' ? '' : lockedOne()
+        ? '<p>Is ' + esc(nm(t)) + ' preparing on another device?</p><button class="btn" data-act="pairOpen">Send or add a preparation</button>'
+        : '<p class="small muted">One device each for this part? <button class="link" data-act="pairOpen">Use two devices</button></p>') +
       '<p class="small muted">Stopping here for today? <button class="link" data-act="util" data-arg="save">Save to a file</button> first.</p></div>';
+  };
+
+  SCREENS.pair = function () {
+    var mine = lockedOne(), o = mine && other(mine), h = '<h1>Two devices</h1>', to = (state.handover || {}).to;
+    if (bothLocked()) return h + '<p>This device already has both preparations.</p><div class="actions"><button class="btn primary" data-act="pairBack">Back</button></div>';
+    if (!mine) {
+      return h + '<p>Each of you can do the private preparation on your own device, at the same time. Afterwards one device brings both together, and you use that device for the sittings.</p>' +
+        '<ol class="how"><li>On each device, open this page, choose Start and set up with the same two names.</li>' +
+        '<li>Below, choose who is preparing on this device. Do your preparation and lock it.</li>' +
+        '<li>When it is locked, come back to this screen to send it to your partner, or to add theirs.</li></ol>' +
+        '<h2>Who is preparing on this device?</h2><div class="actions wrap">' + ['a', 'b'].map(function (p) {
+          return '<button class="btn' + (to === p ? ' on' : '') + '" data-act="pairWho" data-arg="' + p + '">' + esc(nm(p)) + '</button>';
+        }).join('') + '</div>' +
+        '<p class="small muted">The options, Values Deck results and written-notes exchange come from the device that ends up with both preparations. Custom cards from both devices are kept; a card one of you never saw counts as passed.</p>' +
+        '<div class="actions"><button class="btn primary" data-act="pairBack">Continue</button></div>';
+    }
+    return h + '<p>' + esc(nm(mine)) + '’s preparation is locked on this device. One device needs both: either send ' + esc(nm(mine)) + '’s preparation to ' + esc(nm(o)) + ', or add ' + esc(nm(o)) + '’s here. Only one of you needs to send.</p>' +
+      '<h2>Send ' + esc(nm(mine)) + '’s preparation</h2>' +
+      '<p class="small">This holds ' + esc(nm(mine)) + '’s ratings and private writing, and nothing else. Send it to ' + esc(nm(o)) + ' yourself, for example in a message. The app sends nothing.</p>' +
+      '<div class="actions wrap"><button class="btn primary" data-act="pairCopy">Copy as text</button><button class="btn" data-act="pairSave">Save as a file</button></div>' +
+      '<details class="paste"><summary>Show the text</summary><textarea id="pairText" rows="5" readonly spellcheck="false">' + esc(b64(halfJson(mine))) + '</textarea></details>' +
+      '<h2>Add ' + esc(nm(o)) + '’s preparation</h2>' +
+      '<p class="small">Paste the text ' + esc(nm(o)) + ' sent you, or open their file. The next step is done together, so do this when you are both there.</p>' +
+      '<textarea id="pairIn" rows="4" spellcheck="false" autocomplete="off" placeholder="Paste the text here"></textarea>' +
+      '<div class="actions wrap"><button class="btn primary" data-act="pairPaste">Add the pasted preparation</button>' +
+      '<label class="btn filebtn">Open their file<input type="file" accept=".json,application/json,text/plain" data-file="session" hidden></label></div>' +
+      '<div class="actions"><button class="btn" data-act="pairBack">Back</button></div>';
   };
 
   // ---------- private preparation ----------
@@ -1137,7 +1219,7 @@
     },
     resume: function () {
       var s = ui.resumeTo || 'welcome';
-      if (PRIVATE.indexOf(s) >= 0) s = state.handover ? 'handover' : 'welcome';
+      if (PRIVATE.indexOf(s) >= 0 || s === 'pair') s = state.handover ? 'handover' : 'welcome';
       if (s === 'timeout' && !state.timeout) s = 'welcome';
       if (!SCREENS[s] || s === 'resume') s = 'welcome';
       go(s);
@@ -1153,7 +1235,8 @@
     vdPaste: function () {
       var t = (document.getElementById('vdText') || {}).value || '';
       if (!t.trim()) return toast('Paste the text first.');
-      try { importValuesDeck(JSON.parse(t)); } catch (e) { toast('That text is not a Values Deck file. Paste all of it, from { to }.'); }
+      var obj; try { obj = parseText(t); } catch (e) { return toast('That text is not a Values Deck file. Paste all of it.'); }
+      importValuesDeck(obj);
     },
     addCustom: function () {
       var f = ui.cf;
@@ -1317,7 +1400,26 @@
     loadPaste: function () {
       var t = (document.getElementById('loadText') || {}).value || '';
       if (!t.trim()) return toast('Paste the saved text first.');
-      try { loadSession(JSON.parse(t)); } catch (e) { toast('That text is not a save. Paste all of it, from { to }.'); }
+      var obj; try { obj = parseText(t); } catch (e) { return toast('That text is not a save. Paste all of it.'); }
+      loadSession(obj);
+    },
+    pairOpen: function () { ui.eraseArm = false; state.screen = 'pair'; render(); window.scrollTo(0, 0); },
+    pairBack: function () { go(state.handover ? 'handover' : 'welcome'); },
+    pairWho: function (p) { if (!state.prep[p].locked) { state.handover = { to: p, purpose: 'prep' }; save(); render(); } },
+    pairCopy: function () {
+      var d = document.querySelector('details.paste'); if (d) d.open = true;
+      copy(b64(halfJson(lockedOne())), 'pairText');
+    },
+    pairSave: function () {
+      var p = lockedOne();
+      saveFile('enough-of-both-preparation-' + slug(nm(p)) + '-' + today() + '.json', halfJson(p), function () { toast('Saving files is not available here. Use Copy as text.'); });
+    },
+    pairPaste: function () {
+      var t = (document.getElementById('pairIn') || {}).value || '';
+      if (!t.trim()) return toast('Paste the text first.');
+      var obj; try { obj = parseText(t); } catch (e) { return toast('That text could not be read. Copy all of it and paste again.'); }
+      if (!obj || obj.app !== 'enough-of-both' || obj.kind !== 'half') return toast('That is not an Enough of Both preparation.');
+      importHalf(obj);
     },
     savePdf: function () {
       if (ui.pdfBusy) return;
