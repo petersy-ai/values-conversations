@@ -1,0 +1,3 @@
+# Never commit personal answers or reports from either app.
+*.json
+*.pdf
